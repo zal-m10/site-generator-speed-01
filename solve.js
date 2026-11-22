@@ -8,8 +8,13 @@ const REPORT_FILE = 'build-report.txt';
 
 // ---------------------------------------------------------------- text
 
-const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const HAS_SPECIAL = /[&<>"']/;
+const ESC_TABLE = new Array(128).fill(null);
+ESC_TABLE[38] = '&amp;';
+ESC_TABLE[60] = '&lt;';
+ESC_TABLE[62] = '&gt;';
+ESC_TABLE[34] = '&quot;';
+ESC_TABLE[39] = '&#39;';
 
 /** text with & < > " and ' escaped. Fast path when nothing needs escaping. */
 export function escapeHtml(text) {
@@ -17,8 +22,8 @@ export function escapeHtml(text) {
   let out = '';
   let start = 0;
   for (let i = 0; i < text.length; i++) {
-    const e = ESCAPES[text[i]];
-    if (e !== undefined) {
+    const e = ESC_TABLE[text.charCodeAt(i)];
+    if (e) {
       out += text.slice(start, i) + e;
       start = i + 1;
     }
@@ -92,8 +97,8 @@ function wordsOf(text) {
   let n = 0;
   let inWord = false;
   for (let i = 0; i < text.length; i++) {
-    const c = text[i];
-    const ws = c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f' || c === '\v';
+    const c = text.charCodeAt(i);
+    const ws = c === 32 || c === 9 || c === 10 || c === 13 || c === 12 || c === 11;
     if (ws) inWord = false;
     else if (!inWord) { inWord = true; n++; }
   }
@@ -519,7 +524,7 @@ function inline(s, env) {
  */
 function renderMarkdown(src, env, slugify) {
   const ids = new Set();
-  const blocks = [];
+  const out = [];
   const toc = [];
   let excerpt = null;
   for (const t of lex(src)) {
@@ -527,40 +532,57 @@ function renderMarkdown(src, env, slugify) {
       case 'heading': {
         const id = uniqueSlug(slugify(t.text), ids);
         const html = inline(t.text, env);
-        blocks.push(`<h${t.depth} id="${id}">${html}</h${t.depth}>`);
+        out.push(`<h${t.depth} id="${id}">`, html, `</h${t.depth}>`, '\n');
         if (t.depth === 2 || t.depth === 3) toc.push({ level: t.depth, id, html });
         break;
       }
       case 'code': {
         const cls = t.lang === '' ? '' : ` class="language-${escapeHtml(t.lang)}"`;
-        let body = '';
-        for (const l of t.lines) body += `${escapeHtml(l)}\n`;
-        blocks.push(`<pre><code${cls}>${body}</code></pre>`);
+        out.push(`<pre><code${cls}>`);
+        for (const l of t.lines) out.push(escapeHtml(l), '\n');
+        out.push('</code></pre>', '\n');
         break;
       }
       case 'hr':
-        blocks.push('<hr>');
+        out.push('<hr>', '\n');
         break;
       case 'blockquote':
-        blocks.push(t.lines.length === 0 ? '<blockquote>\n</blockquote>' : `<blockquote>\n<p>${inline(t.lines.join('\n'), env)}</p>\n</blockquote>`);
+        if (t.lines.length === 0) {
+          out.push('<blockquote>\n</blockquote>', '\n');
+        } else {
+          const bq = t.lines.join('\n');
+          out.push('<blockquote>\n<p>');
+          inlineRange(bq, 0, bq.length, env, out);
+          out.push('</p>\n</blockquote>', '\n');
+        }
         break;
       case 'list': {
         const tag = t.ordered ? 'ol' : 'ul';
         const open = t.ordered && t.start !== 1 ? `<ol start="${t.start}">` : `<${tag}>`;
-        let items = '';
-        for (const item of t.items) items += `<li>${inline(item, env)}</li>\n`;
-        blocks.push(`${open}\n${items}</${tag}>`);
+        out.push(open, '\n');
+        for (const item of t.items) {
+          out.push('<li>');
+          inlineRange(item, 0, item.length, env, out);
+          out.push('</li>', '\n');
+        }
+        out.push(`</${tag}>`, '\n');
         break;
       }
       case 'paragraph': {
-        const html = inline(t.text, env);
-        if (excerpt === null) excerpt = html;
-        blocks.push(`<p>${html}</p>`);
+        if (excerpt === null) {
+          const html = inline(t.text, env);
+          excerpt = html;
+          out.push('<p>', html, '</p>', '\n');
+        } else {
+          out.push('<p>');
+          inlineRange(t.text, 0, t.text.length, env, out);
+          out.push('</p>', '\n');
+        }
         break;
       }
     }
   }
-  return { html: blocks.map((b) => `${b}\n`).join(''), toc, excerpt: excerpt ?? '' };
+  return { html: out.join(''), toc, excerpt: excerpt ?? '' };
 }
 
 // ---------------------------------------------------------------- templates
@@ -717,9 +739,18 @@ function renderNodes(nodes, scope, ctx, depth, out) {
       case 'for': {
         const xs = lookup(scope, n.path);
         if (!Array.isArray(xs)) break;
+        const vars = {};
+        const loop = { index: 0, first: false, last: false, length: xs.length };
+        vars[n.name] = undefined;
+        vars.loop = loop;
+        const child = { vars, parent: scope };
         for (let k = 0; k < xs.length; k++) {
-          const vars = { [n.name]: xs[k], loop: { index: k + 1, first: k === 0, last: k === xs.length - 1, length: xs.length } };
-          renderNodes(n.body, { vars, parent: scope }, ctx, depth, out);
+          vars[n.name] = xs[k];
+          loop.index = k + 1;
+          loop.first = k === 0;
+          loop.last = k === xs.length - 1;
+          vars.loop = loop;
+          renderNodes(n.body, child, ctx, depth, out);
         }
         break;
       }
@@ -736,9 +767,9 @@ function renderNodes(nodes, scope, ctx, depth, out) {
 
 const dirOf = (path) => (path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '');
 
-/** `rel` (a link's path, "/"-separated) from the directory `dir` of a source, or null when it climbs out of the root. */
-function resolvePath(dir, rel) {
-  const parts = dir === '' ? [] : dir.split('/');
+/** `rel` (a link's path, "/"-separated) from the directory parts `dirParts` of a source, or null when it climbs out of the root. */
+function resolvePath(dirParts, rel) {
+  const parts = dirParts.slice();
   for (const seg of rel.split('/')) {
     if (seg === '' || seg === '.') continue;
     if (seg === '..') {
@@ -832,13 +863,14 @@ export function run(input) {
   const staticPaths = new Set(statics.map((f) => f.path));
   for (const s of kept) {
     const dir = dirOf(s.path);
+    const dirParts = dir === '' ? [] : dir.split('/');
     const env = {
       link: (target) => {
         if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(target) || target.startsWith('/') || target.startsWith('#')) return target;
         const hash = target.indexOf('#');
         const rel = hash === -1 ? target : target.slice(0, hash);
         const frag = hash === -1 ? '' : target.slice(hash);
-        const path = rel === '' ? null : resolvePath(dir, rel);
+        const path = rel === '' ? null : resolvePath(dirParts, rel);
         if (path !== null && bySource.has(path)) return `${bySource.get(path).url}${frag}`;
         if (path !== null && staticPaths.has(path)) return `${base}/${path}${frag}`;
         broken.add(`broken-link ${s.path} -> ${target}`);
@@ -908,24 +940,45 @@ export function run(input) {
   const allTags = tags.map((t) => ({ name: t.name, slug: t.slug, url: t.url, count: t.posts.length }));
   const recent = posts.slice(0, input.site.recent).map((p) => cards.get(p));
   const ctx = { templates, escape: escapeHtml };
+  const baseScope = { vars: { site, tags: allTags, recent }, parent: null };
   const render = (name, vars) => {
     const nodes = templates.get(name);
     if (nodes === undefined) return null;
     const out = [];
-    renderNodes(nodes, { vars: { site, tags: allTags, recent, ...vars }, parent: null }, ctx, 0, out);
+    renderNodes(nodes, { vars, parent: baseScope }, ctx, 0, out);
     return out.join('');
   };
   for (const s of kept) {
-    const card = cards.get(s) ?? cardOf(s);
-    const page = {
-      ...card,
-      slug: s.slug,
-      content: s.html,
-      toc: s.toc.map((h) => ({ level: h.level, id: h.id, html: h.html })),
-      newer: linkOf(s.newer ?? null),
-      older: linkOf(s.older ?? null),
-      is_post: s.post,
-    };
+    let page;
+    if (s.post) {
+      const card = cards.get(s);
+      page = {
+        ...card,
+        slug: s.slug,
+        content: s.html,
+        toc: s.toc.map((h) => ({ level: h.level, id: h.id, html: h.html })),
+        newer: linkOf(s.newer ?? null),
+        older: linkOf(s.older ?? null),
+        is_post: s.post,
+      };
+    } else {
+      page = {
+        title: s.data.title,
+        url: s.url,
+        date: s.data.date ?? '',
+        date_long: s.data.date === undefined ? '' : longDate(s.data.date),
+        summary: s.data.summary ?? '',
+        excerpt: s.excerpt,
+        reading_minutes: Math.max(1, Math.ceil(wordsOf(s.body) / 200)),
+        tags: s.tagRefs.map((t) => ({ name: t.name, slug: t.slug, url: t.url })),
+        slug: s.slug,
+        content: s.html,
+        toc: s.toc.map((h) => ({ level: h.level, id: h.id, html: h.html })),
+        newer: linkOf(s.newer ?? null),
+        older: linkOf(s.older ?? null),
+        is_post: s.post,
+      };
+    }
     output[`${s.outDir}/index.html`] = render(s.layout, { page });
   }
   const per = input.site.per_page;
