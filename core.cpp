@@ -212,8 +212,8 @@ std::string uniqueSlug(const std::string& slug, std::unordered_set<std::string>&
 
 std::string longDate(const std::string& date) {
   std::string y = date.substr(0, 4);
-  int m = std::stoi(date.substr(5, 2));
-  int d = std::stoi(date.substr(8, 2));
+  int m = static_cast<int>(parseInt(std::string_view(date).substr(5, 2)));
+  int d = static_cast<int>(parseInt(std::string_view(date).substr(8, 2)));
   return std::to_string(d) + " " + MONTHS[m - 1] + " " + y;
 }
 
@@ -279,9 +279,9 @@ bool matchDate(const std::string& raw, int& y, int& mo, int& d) {
     if (i == 4 || i == 7) continue;
     if (!isDigit(raw[i])) return false;
   }
-  y = std::stoi(raw.substr(0, 4));
-  mo = std::stoi(raw.substr(5, 2));
-  d = std::stoi(raw.substr(8, 2));
+  y = static_cast<int>(parseInt(std::string_view(raw).substr(0, 4)));
+  mo = static_cast<int>(parseInt(std::string_view(raw).substr(5, 2)));
+  d = static_cast<int>(parseInt(std::string_view(raw).substr(8, 2)));
   return true;
 }
 
@@ -635,7 +635,7 @@ std::vector<Token> lex(const std::string& src) {
       Token t;
       t.type = Token::kList;
       t.ordered = isOrdered;
-      t.start = isOrdered ? std::stoll(orderedNum) : 1;
+      t.start = isOrdered ? parseInt(orderedNum) : 1;
       for (auto& parts : items) {
         std::string joined;
         for (size_t p = 0; p < parts.size(); p++) {

@@ -186,7 +186,7 @@ std::string jsNumber(double v) {
   size_t epos = t.find('e', p);
   int exp10 = 0;
   std::string mant = (epos == std::string::npos) ? t.substr(p) : t.substr(p, epos - p);
-  if (epos != std::string::npos) exp10 = std::stoi(t.substr(epos + 1));
+  if (epos != std::string::npos) exp10 = static_cast<int>(parseInt(std::string_view(t).substr(epos + 1)));
   size_t dot = mant.find('.');
   std::string intpart = (dot == std::string::npos) ? mant : mant.substr(0, dot);
   std::string fracpart = (dot == std::string::npos) ? "" : mant.substr(dot + 1);
