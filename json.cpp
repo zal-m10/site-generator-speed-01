@@ -39,10 +39,11 @@ struct Parser {
     // *p == '"'
     p++;
     std::string out;
-    // Fast path: copy runs that hold no '"' or '\\'.
+    // Fast path: copy runs that hold no '"' or '\\'. The next '"' or '\\'
+    // is located with the SSE2 scan (findJsonStrSpecial).
     for (;;) {
       const char* run = p;
-      while (p < end && *p != '"' && *p != '\\') p++;
+      p += findJsonStrSpecial(p, static_cast<size_t>(end - p));
       out.append(run, p);
       if (p >= end) fail("unterminated string");
       if (*p == '"') { p++; return out; }
@@ -194,6 +195,10 @@ void stringifyInto(const Value& v, std::string& out) {
 
 // Append s as a JSON string literal (quotes included) directly to out:
 // no temporary string per value — the output is megabytes of HTML.
+// The next byte needing an escape is located with the SSE2 scan
+// (findJsonQuoteSpecial: '"', '\\', or a byte < 0x20); the safe run before
+// it is copied whole, so long plain stretches cost one scan, not one test
+// per byte.
 void jsonEscapeInto(std::string& out, const std::string& s) {
   static const char* kHex = "0123456789abcdef";
   out.push_back('"');
@@ -201,25 +206,10 @@ void jsonEscapeInto(std::string& out, const std::string& s) {
   size_t n = s.size();
   size_t run = 0;
   size_t i = 0;
-  // SWAR: skip 8 safe bytes at a time. A byte needs escaping iff it is
-  // '"' (0x22), '\\' (0x5C), or < 0x20. hasZero(x) != 0 iff x has a zero
-  // byte (a borrow chain can only start at a byte that is 0, so the
-  // boolean is exact); x22/x5c have a zero byte iff w has 0x22/0x5C, and
-  // t = w & 0xE0.. has a zero byte iff w has a byte < 0x20.
-  auto hasZero = [](uint64_t x) {
-    return (x - 0x0101010101010101ULL) & ~x & 0x8080808080808080ULL;
-  };
-  while (i + 8 <= n) {
-    uint64_t w;
-    std::memcpy(&w, p + i, 8);
-    uint64_t x22 = w ^ 0x2222222222222222ULL;
-    uint64_t x5c = w ^ 0x5C5C5C5C5C5C5C5CULL;
-    uint64_t t = w & 0xE0E0E0E0E0E0E0E0ULL;
-    if ((hasZero(x22) | hasZero(x5c) | hasZero(t)) == 0) { i += 8; continue; }
-    break;
-  }
-  for (; i < n; i++) {
-    unsigned char c = static_cast<unsigned char>(s[i]);
+  while (i < n) {
+    size_t j = findJsonQuoteSpecial(p + i, n - i) + i;
+    if (j == n) break;
+    unsigned char c = static_cast<unsigned char>(s[j]);
     const char* esc = nullptr;
     char small[8];
     switch (c) {
@@ -239,12 +229,13 @@ void jsonEscapeInto(std::string& out, const std::string& s) {
         break;
     }
     if (esc) {
-      if (i > run) out.append(s, run, i - run);
+      if (j > run) out.append(s, run, j - run);
       out += esc;
-      run = i + 1;
+      run = j + 1;
     }
+    i = j + 1;
   }
-  if (s.size() > run) out.append(s, run, s.size() - run);
+  if (n > run) out.append(s, run, n - run);
   out.push_back('"');
 }
 
@@ -255,6 +246,21 @@ Value jsonParse(const std::string& text) {
   Value v = ps.parseValue();
   ps.ws();
   if (ps.p != ps.end) throw std::runtime_error("trailing characters");
+  return v;
+}
+
+size_t jsonSkipWs(const std::string& text, size_t pos) {
+  while (pos < text.size() &&
+         (text[pos] == ' ' || text[pos] == '\t' || text[pos] == '\n' || text[pos] == '\r'))
+    pos++;
+  return pos;
+}
+
+Value jsonParseOne(const std::string& text, size_t& pos) {
+  Parser ps{text.data(), text.data() + text.size()};
+  ps.p = text.data() + pos;
+  Value v = ps.parseValue();
+  pos = static_cast<size_t>(ps.p - text.data());
   return v;
 }
 

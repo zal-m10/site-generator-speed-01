@@ -1,14 +1,14 @@
-// The harness runs `node /bot/main.ts` (node22). It reads every case from
-// /input/cases.json (a JSON array of {id, input}), answers them with the native
-// addon, and writes /output/answers.json. Outside a container MAKEFUN_INPUT_DIR
-// and MAKEFUN_OUTPUT_DIR stand in for /input and /output.
+// The harness runs `node /bot/main.ts` (node22). It answers every case in
+// /input/cases.json and writes /output/answers.json. Outside a container
+// MAKEFUN_INPUT_DIR and MAKEFUN_OUTPUT_DIR stand in for /input and /output.
 //
-// The whole cases file is handed to the addon as one raw string and the whole
-// answers file comes back as one raw string: no JSON.parse / JSON.stringify in
-// JS on this path, so the timed work is the addon's alone (the heat nets off a
-// null entry that still pays the JS parse of the input).
+// The batch goes to the addon as file paths: C++ reads cases.json itself,
+// processes one case at a time (parse, build, serialize, write) and appends
+// each case's answers JSON to the output file as it goes. No JSON.parse /
+// JSON.stringify in JS on this path, and the multi-megabyte answers text is
+// never held as one JS string, so the timed work is the addon's alone (the
+// heat nets off a null entry that still pays the JS parse of the input).
 
-import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { setFlagsFromString } from 'node:v8';
 import { createRequire } from 'node:module';
@@ -23,11 +23,14 @@ setFlagsFromString('--no-incremental-marking --no-turbofan');
 const require = createRequire(import.meta.url);
 const addon = require('./addon.node') as {
   runCases: (text: string, normalize: (s: string) => string) => string;
+  runBatch: (inputPath: string, outputPath: string, normalize: (s: string) => string) => number;
 };
 
 const INPUT_DIR = process.env.MAKEFUN_INPUT_DIR ?? '/input';
 const OUTPUT_DIR = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
 
-const text = readFileSync(join(INPUT_DIR, 'cases.json'), 'utf8');
-const answers = addon.runCases(text, (s: string) => s.normalize('NFKD'));
-writeFileSync(join(OUTPUT_DIR, 'answers.json'), answers);
+addon.runBatch(
+  join(INPUT_DIR, 'cases.json'),
+  join(OUTPUT_DIR, 'answers.json'),
+  (s: string) => s.normalize('NFKD'),
+);

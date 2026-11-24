@@ -68,6 +68,159 @@ std::string jsTrim(const std::string& s);
 // True when cp is a Unicode White_Space code point.
 bool isWhiteSpace(uint32_t cp);
 
+// ---------------------------------------------------------------------------
+// Delimiter scanning with SSE2 (x86_64) and a scalar fallback.
+//
+// The hot loops scan long stretches of mostly-plain text for a small set of
+// delimiter bytes (HTML escapes, Markdown inline markers, JSON string
+// boundaries). Each helper returns the offset of the first delimiter byte in
+// [p, p+n), or n when the range holds none. The SSE2 path compares 16 bytes
+// at a time and finds the first set bit of the match mask; the tail (<16
+// bytes) and non-x86_64 builds use the scalar loop, so the result is
+// identical on every platform.
+#if defined(__x86_64__)
+#include <immintrin.h>
+#endif
+
+// First byte in {&, <, >, ", '} (the five HTML escapes), or n.
+inline size_t findHtmlSpecial(const char* p, size_t n) {
+#if defined(__x86_64__)
+  size_t i = 0;
+  const __m128i amp = _mm_set1_epi8('&');
+  const __m128i lt = _mm_set1_epi8('<');
+  const __m128i gt = _mm_set1_epi8('>');
+  const __m128i quot = _mm_set1_epi8('"');
+  const __m128i apos = _mm_set1_epi8('\'');
+  while (i + 16 <= n) {
+    __m128i x = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p + i));
+    __m128i m = _mm_cmpeq_epi8(x, amp);
+    m = _mm_or_si128(m, _mm_cmpeq_epi8(x, lt));
+    m = _mm_or_si128(m, _mm_cmpeq_epi8(x, gt));
+    m = _mm_or_si128(m, _mm_cmpeq_epi8(x, quot));
+    m = _mm_or_si128(m, _mm_cmpeq_epi8(x, apos));
+    unsigned bits = static_cast<unsigned>(_mm_movemask_epi8(m));
+    if (bits != 0) return i + static_cast<size_t>(__builtin_ctz(bits));
+    i += 16;
+  }
+  for (; i < n; i++) {
+    char c = p[i];
+    if (c == '&' || c == '<' || c == '>' || c == '"' || c == '\'') return i;
+  }
+  return n;
+#else
+  for (size_t i = 0; i < n; i++) {
+    char c = p[i];
+    if (c == '&' || c == '<' || c == '>' || c == '"' || c == '\'') return i;
+  }
+  return n;
+#endif
+}
+
+// First byte in {\, `, *, [, <, >, &, ", '} (Markdown inline delimiters), or n.
+inline size_t findInlineSpecial(const char* p, size_t n) {
+#if defined(__x86_64__)
+  size_t i = 0;
+  const __m128i bs = _mm_set1_epi8('\\');
+  const __m128i tick = _mm_set1_epi8('`');
+  const __m128i star = _mm_set1_epi8('*');
+  const __m128i lbrack = _mm_set1_epi8('[');
+  const __m128i lt = _mm_set1_epi8('<');
+  const __m128i gt = _mm_set1_epi8('>');
+  const __m128i amp = _mm_set1_epi8('&');
+  const __m128i quot = _mm_set1_epi8('"');
+  const __m128i apos = _mm_set1_epi8('\'');
+  while (i + 16 <= n) {
+    __m128i x = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p + i));
+    __m128i m = _mm_cmpeq_epi8(x, bs);
+    m = _mm_or_si128(m, _mm_cmpeq_epi8(x, tick));
+    m = _mm_or_si128(m, _mm_cmpeq_epi8(x, star));
+    m = _mm_or_si128(m, _mm_cmpeq_epi8(x, lbrack));
+    m = _mm_or_si128(m, _mm_cmpeq_epi8(x, lt));
+    m = _mm_or_si128(m, _mm_cmpeq_epi8(x, gt));
+    m = _mm_or_si128(m, _mm_cmpeq_epi8(x, amp));
+    m = _mm_or_si128(m, _mm_cmpeq_epi8(x, quot));
+    m = _mm_or_si128(m, _mm_cmpeq_epi8(x, apos));
+    unsigned bits = static_cast<unsigned>(_mm_movemask_epi8(m));
+    if (bits != 0) return i + static_cast<size_t>(__builtin_ctz(bits));
+    i += 16;
+  }
+  for (; i < n; i++) {
+    char c = p[i];
+    if (c == '\\' || c == '`' || c == '*' || c == '[' || c == '<' || c == '>' ||
+        c == '&' || c == '"' || c == '\'')
+      return i;
+  }
+  return n;
+#else
+  for (size_t i = 0; i < n; i++) {
+    char c = p[i];
+    if (c == '\\' || c == '`' || c == '*' || c == '[' || c == '<' || c == '>' ||
+        c == '&' || c == '"' || c == '\'')
+      return i;
+  }
+  return n;
+#endif
+}
+
+// First byte in {", \} (JSON string end or escape), or n.
+inline size_t findJsonStrSpecial(const char* p, size_t n) {
+#if defined(__x86_64__)
+  size_t i = 0;
+  const __m128i quot = _mm_set1_epi8('"');
+  const __m128i bs = _mm_set1_epi8('\\');
+  while (i + 16 <= n) {
+    __m128i x = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p + i));
+    __m128i m = _mm_or_si128(_mm_cmpeq_epi8(x, quot), _mm_cmpeq_epi8(x, bs));
+    unsigned bits = static_cast<unsigned>(_mm_movemask_epi8(m));
+    if (bits != 0) return i + static_cast<size_t>(__builtin_ctz(bits));
+    i += 16;
+  }
+  for (; i < n; i++) {
+    if (p[i] == '"' || p[i] == '\\') return i;
+  }
+  return n;
+#else
+  for (size_t i = 0; i < n; i++) {
+    if (p[i] == '"' || p[i] == '\\') return i;
+  }
+  return n;
+#endif
+}
+
+// First byte that needs JSON escaping: {", \, any byte < 0x20}, or n.
+// A byte is < 0x20 exactly when (b & 0xE0) == 0. This matches the escaping
+// our serializer already does; lone-surrogate bytes (0xED) are not escaped
+// because our parser normalises lone surrogates to U+FFFD at parse time, so
+// they never reach the serializer.
+inline size_t findJsonQuoteSpecial(const char* p, size_t n) {
+#if defined(__x86_64__)
+  size_t i = 0;
+  const __m128i quot = _mm_set1_epi8('"');
+  const __m128i bs = _mm_set1_epi8('\\');
+  const __m128i hi = _mm_set1_epi8(static_cast<char>(0xE0));
+  const __m128i zero = _mm_setzero_si128();
+  while (i + 16 <= n) {
+    __m128i x = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p + i));
+    __m128i m = _mm_or_si128(_mm_cmpeq_epi8(x, quot), _mm_cmpeq_epi8(x, bs));
+    m = _mm_or_si128(m, _mm_cmpeq_epi8(_mm_and_si128(x, hi), zero));
+    unsigned bits = static_cast<unsigned>(_mm_movemask_epi8(m));
+    if (bits != 0) return i + static_cast<size_t>(__builtin_ctz(bits));
+    i += 16;
+  }
+  for (; i < n; i++) {
+    unsigned char c = static_cast<unsigned char>(p[i]);
+    if (c == '"' || c == '\\' || c < 0x20) return i;
+  }
+  return n;
+#else
+  for (size_t i = 0; i < n; i++) {
+    unsigned char c = static_cast<unsigned char>(p[i]);
+    if (c == '"' || c == '\\' || c < 0x20) return i;
+  }
+  return n;
+#endif
+}
+
 // NFKD normalisation callback (implemented by the caller via JS
 // String.prototype.normalize, which is exactly the sandbox's Node ICU).
 // Input and output are UTF-8.
