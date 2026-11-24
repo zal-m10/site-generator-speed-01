@@ -10,6 +10,13 @@
 
 // Parse one JSON document. Throws std::runtime_error on malformed input.
 Value jsonParse(const std::string& text);
+// Parse one JSON value starting at text[pos] (leading whitespace skipped).
+// On return pos is just past the value. Throws std::runtime_error on
+// malformed input. Lets a caller stream values out of a larger buffer
+// without parsing the whole document at once.
+Value jsonParseOne(const std::string& text, size_t& pos);
+// Skip JSON whitespace starting at text[pos]; returns the new position.
+size_t jsonSkipWs(const std::string& text, size_t pos);
 // Serialize exactly as JS JSON.stringify would (insertion order for objects).
 // Undefined object members are skipped; undefined array elements become null.
 std::string jsonStringify(const Value& v);

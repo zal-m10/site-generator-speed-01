@@ -75,35 +75,40 @@ std::string escapeHtml(const std::string& text) {
     table[38] = t38; table[60] = t60; table[62] = t62; table[34] = t34; table[39] = t39;
     init = true;
   }
-  bool special = false;
-  for (unsigned char c : text) {
-    if (c == '&' || c == '<' || c == '>' || c == '"' || c == '\'') { special = true; break; }
-  }
+  bool special = findHtmlSpecial(text.data(), text.size()) != text.size();
   if (!special) return text;
   std::string out;
   size_t start = 0;
-  for (size_t i = 0; i < text.size(); i++) {
-    unsigned char c = static_cast<unsigned char>(text[i]);
+  size_t i = 0;
+  while (i < text.size()) {
+    size_t j = findHtmlSpecial(text.data() + i, text.size() - i) + i;
+    if (j == text.size()) break;
+    unsigned char c = static_cast<unsigned char>(text[j]);
     const char* e = c < 128 ? table[c] : nullptr;
     if (e) {
-      out.append(text, start, i - start);
+      out.append(text, start, j - start);
       out += e;
-      start = i + 1;
+      start = j + 1;
     }
+    i = j + 1;
   }
   out.append(text, start, std::string::npos);
   return out;
 }
 
 // Append `text` to `out` with the same five HTML escapes as escapeHtml,
-// without building a temporary string.
+// without building a temporary string. The next escape is located with the
+// SSE2 scan (findHtmlSpecial); the run between escapes is copied whole.
 void escapeHtmlInto(std::string& out, const char* p, size_t n) {
 #ifdef NATIVE_STATS
   g_stats.escapeHtmlInto++;
 #endif
   size_t start = 0;
-  for (size_t i = 0; i < n; i++) {
-    char c = p[i];
+  size_t i = 0;
+  while (i < n) {
+    size_t j = findHtmlSpecial(p + i, n - i) + i;
+    if (j == n) break;
+    char c = p[j];
     const char* e = nullptr;
     switch (c) {
       case '&': e = "&amp;"; break;
@@ -114,10 +119,11 @@ void escapeHtmlInto(std::string& out, const char* p, size_t n) {
       default: break;
     }
     if (e) {
-      out.append(p, start, i - start);
+      out.append(p, start, j - start);
       out += e;
-      start = i + 1;
+      start = j + 1;
     }
+    i = j + 1;
   }
   out.append(p, start, n - start);
 }
@@ -706,14 +712,10 @@ void inlineRange(const std::string& s, size_t start, size_t end, const LinkEnv& 
   size_t run = start;
   for (;;) {
     // Next byte in {\,`,*,[,<,>,&,",'} at or after i (all ASCII, so a byte
-    // scan equals the JS regex scan).
-    size_t j = std::string::npos;
-    for (size_t k = i; k < end; k++) {
-      char c = s[k];
-      if (c == '\\' || c == '`' || c == '*' || c == '[' || c == '<' || c == '>' ||
-          c == '&' || c == '"' || c == '\'') { j = k; break; }
-    }
-    if (j == std::string::npos || j >= end) break;
+    // scan equals the JS regex scan). Located with the SSE2 scan
+    // (findInlineSpecial); the run before it is copied whole.
+    size_t j = findInlineSpecial(s.data() + i, end - i) + i;
+    if (j >= end) break;
     char c = s[j];
     const char* ent = nullptr;
     switch (c) {
